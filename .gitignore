@@ -127,3 +127,4 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+vendorid-generator-service-package.zip
