@@ -1,3 +1,4 @@
+import calendar
 import json, requests
 from Models.ContentRequest import ContentRequest
 import os
@@ -5,17 +6,33 @@ from dotenv import load_dotenv
 from Models.DataLoad import DataLoadResponse
 from Models.DataLoadLOGRequest import DataLoadLOGRequest
 import time
-
+from peewee import *
+import peewee
+import datetime
 
 from Models.TitleRequest import TitleRequest
-load_dotenv()
 
+from aws_xray_sdk.core import xray_recorder
+from aws_xray_sdk.core import patch_all
+import uuid
+
+from Services.MoltenUpdater import update_molten
+
+load_dotenv()
 
 test = False
 
+if not test:
+    patch_all()
+
+db = MySQLDatabase(os.getenv("MYSQL_DBNAME"), 
+                            host=os.getenv("MYSQL_HOST"),
+                            port=int(os.getenv("MYSQL_PORT")), 
+                            user=os.getenv("MYSQL_USER"), 
+                            password=os.getenv("MYSQL_PASSWORD"))
 
 def create_data_load(titleRequest:TitleRequest):
-    time.sleep(0.5)
+    
     if test:
         print("###### T E S T  M O D E ######")
     print("@create_data_load")
@@ -43,36 +60,68 @@ def create_data_load(titleRequest:TitleRequest):
         print("Error",x.text)
         return None
     
-def generate_vendor_id(titleRequest:TitleRequest):
-    time.sleep(0.5)
-    print("@generate_vendor_id")
-    url_generate_vendor_id = os.getenv("url_generate_vendor_id")
-    payload = {	
-        'moltenId':f"{titleRequest.moltenId}",
-        'title':f"{titleRequest.title}"
-    }
+class TitleModel(peewee.Model):
+    id = peewee.CharField()
+    molten_id = peewee.CharField()
+    title = peewee.CharField()
+    vendor_id = peewee.CharField()
+ 
+    class Meta:
+        database = db
+        db_table = 'title'
 
-    print("\n\n:::BUILT PAYLOAD:::\n\n")
-    print(payload)
+class VendorIDRepository():
+    def __init__(self):
+        print("1) constructor VendorIDRepository")
+      
+    def create(self, obj): 
+        print("5) verifying if exists")
+        exists = TitleModel.select().where(TitleModel.molten_id == obj.moltenId)
+        if len(exists) > 0:
+            print("===> item already exists")
+            return None
+        print("6) creating in database")
+        date = datetime.datetime.utcnow()
+        utc_time = calendar.timegm(date.utctimetuple())   
+        generatedVendorID = obj.title.upper().replace(" ", "").replace("-", "")+ \
+            "_SOFA_"+ \
+            datetime.datetime.now().strftime("%Y%m%d")+ \
+            "_"+str(utc_time)
+        newid=uuid.uuid4()
+        newTitleCore = TitleModel.create(                
+            molten_id  = obj.moltenId,
+            title  = obj.title,
+            vendor_id = generatedVendorID,
+            id = str(newid)
+        )
+
+        print("7) updating in molten ",obj.moltenId,generatedVendorID)
+        update_molten(obj.moltenId,generatedVendorID)
+        #update_molten("63986c2de655a4bc64c09f9e","TESTE")
+        
+        newTitleCore.save()
+
+def generate_vendor_id(titleRequest:TitleRequest):
+    
+    print("4)generate vendor id 1855")
 
     try:
-        x = requests.post(url_generate_vendor_id, json = payload)        
-        if x.status_code in [201,200]:
-            print("Vendor ID Generated")
-            print(x.text)
-            return True
-        else:
-            print("Error",x.text)
-            return False
+        
+        print("4)calling vendorIDRepository.create", titleRequest)
+        vendorIDRepository = VendorIDRepository()
+        vendorIDRepository.create(titleRequest)
+        
+        return True
     except Exception as e:
         print("ERROR")
         print(str(e))
         return False
 
-def create_log(log:DataLoadLOGRequest):
-    time.sleep(0.5)
-    print("@create_log")
-    url_generate_vendor_id = os.getenv("url_create_log")
+def create_log(log:DataLoadLOGRequest, step:str):
+    
+    print("##creating log####", step)
+    url_create_log = os.getenv("url_create_log")
+    print(url_create_log)
     payload = {	
         'dataLoadId':f"{log.dataLoadId}",
         'routine':f"{log.routineId}",
@@ -84,32 +133,35 @@ def create_log(log:DataLoadLOGRequest):
     print("\n\n:::BUILT PAYLOAD:::\n\n")
     print(payload)
 
-    try:
-        x = requests.post(url_generate_vendor_id, json = payload)        
-        if x.status_code in [201,200]:
-            print("LOG Registered")
-            print(x.text)
-            return True
-        else:
-            print("Error",x.text)
-            return False
-    except Exception as e:
-        print("ERROR")
-        print(str(e))
-        return False
+    
+    x = requests.post(url_create_log, json = payload)        
+    if x.status_code in [201,200]:
+        print("LOG Registered")
+        print(x.text)        
+    else:
+        print("Error",x.text)        
+
 
 def lambda_handler(event, context): 
+ 
+    db = MySQLDatabase(os.getenv("MYSQL_DBNAME"), 
+                                host=os.getenv("MYSQL_HOST"),
+                                port=int(os.getenv("MYSQL_PORT")), 
+                                user=os.getenv("MYSQL_USER"), 
+                                password=os.getenv("MYSQL_PASSWORD"))
+    print(":::INFO total records:::")
+    print(str(len(event['Records'])))
     try:   
         for record in event['Records']:        
             #1)getting content
-            print(":::getting content:::")
+            print("1)getting content")
             payload = record["body"]
             content = TitleRequest()
             content.__dict__ = json.loads(payload)       
             print(content.__dict__)
 
             #2)creating dataload
-            print(":::creating dataload:::")
+            print("2)creating dataload")
             dataLoad = create_data_load(content)
             
             log = DataLoadLOGRequest()
@@ -119,10 +171,10 @@ def lambda_handler(event, context):
             log.routineId = os.getenv("routine")
             log.detail = "Generating Vendor ID"
 
-            create_log(log)
+            create_log(log, "after creating dataload")
 
             #3)generating vendor_id 
-            print(":::generating vendor_id :::")
+            print("3)generating vendor_id")
             titleRequest = TitleRequest()
             titleRequest.__dict__ = json.loads(payload)  
             isGenerated = generate_vendor_id(titleRequest)
@@ -136,7 +188,10 @@ def lambda_handler(event, context):
                 log.routineId = os.getenv("routine")
                 log.detail = "Vendor ID Generated"
 
-                create_log(log)
+                create_log(log, "isGenerated = True")
+
+                
+
             else:
                 log = DataLoadLOGRequest()
                 log.dataLoadId = dataLoad.id
@@ -145,19 +200,20 @@ def lambda_handler(event, context):
                 log.routineId = os.getenv("routine")
                 log.detail = "Error Generating Vendor ID"
 
-                create_log(log)
+                create_log(log, "isGenerated = False")
 
 
     except Exception as e:
         print(":::::ERROR:::::")
         print(str(e))
-        
+
+
 
 if test:
     ####testing local####
     testContent = TitleRequest()
     testContent.title ="Filme do Caverna Dragao"
-    testContent.moltenId='999'
+    testContent.moltenId='63986c2de655a4bc64c09f9e'
 
     dataLoad = create_data_load(testContent)
     
@@ -169,7 +225,7 @@ if test:
     log.routineId = os.getenv("routine")
     log.detail = "Generating Vendor ID"
 
-    create_log(log)
+    create_log(log, "testing local")
     
 
     isGenerated = generate_vendor_id(testContent)
@@ -181,4 +237,5 @@ if test:
     log.routineId = os.getenv("routine")
     log.detail = "Vendor ID Generated"
 
-    create_log(log)
+    create_log(log, "testing local")
+

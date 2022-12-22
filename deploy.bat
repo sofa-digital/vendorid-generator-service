@@ -5,7 +5,9 @@ cd ..
 cd ..
 zip -g vendorid-generator-service-package.zip lambda_function.py
 zip -g vendorid-generator-service-package.zip Models/*
+zip -g vendorid-generator-service-package.zip Services/*
   aws lambda update-function-code \
     --function-name  vendorid-generator-service \
     --zip-file fileb://vendorid-generator-service-package.zip \
     --region sa-east-1
+
